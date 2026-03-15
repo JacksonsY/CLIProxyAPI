@@ -1586,6 +1586,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		return
 	}
 
+	now := time.Now()
+
 	shouldResumeModel := false
 	shouldSuspendModel := false
 	suspendReason := ""
@@ -1595,8 +1597,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
-		now := time.Now()
-
 		if result.Success {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
@@ -1702,6 +1702,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	}
+
+	// Feed result back into feedback-aware selectors (runtime-only).
+	if observer, ok := m.selector.(ResultObserver); ok && observer != nil {
+		observer.ObserveResult(result, now)
 	}
 
 	m.hook.OnResult(ctx, result)
