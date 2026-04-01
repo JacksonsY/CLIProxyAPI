@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -649,13 +651,16 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", r.Header.Get("Session_id"))
+	ensureCodexTurnMetadata(r.Header, ginHeaders)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
-	r.Header.Set("Connection", "Keep-Alive")
+	r.Header.Set("Connection", "close")
+	r.Close = true
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {
@@ -664,7 +669,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		}
 	}
 	if !isAPIKey {
-		r.Header.Set("Originator", "codex_cli_rs")
+		r.Header.Set("Originator", "codex_sdk_ts")
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				r.Header.Set("Chatgpt-Account-Id", accountID)
@@ -676,6 +681,54 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func ensureCodexTurnMetadata(target http.Header, source http.Header) {
+	if target == nil {
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(source.Get("X-Codex-Turn-Metadata")); val != "" {
+			target.Set("X-Codex-Turn-Metadata", val)
+			return
+		}
+	}
+	if strings.TrimSpace(target.Get("X-Codex-Turn-Metadata")) != "" {
+		return
+	}
+
+	seed := strings.TrimSpace(target.Get("X-Client-Request-Id"))
+	if seed == "" {
+		seed = strings.TrimSpace(target.Get("Session_id"))
+	}
+	if seed == "" {
+		seed = uuid.NewString()
+	}
+
+	sessionID := strings.TrimSpace(target.Get("Session_id"))
+	if sessionID == "" {
+		sessionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:session:"+seed)).String()
+		target.Set("Session_id", sessionID)
+	}
+
+	hash := sha256.Sum256([]byte(seed))
+	turnID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:turn:"+seed)).String()
+	sandbox := "none"
+	if hash[1]&1 == 1 {
+		sandbox = "windows_elevated"
+	}
+
+	payload := map[string]any{
+		"turn_id": turnID,
+		"sandbox": sandbox,
+	}
+	if hash[0]%2 == 0 {
+		payload["session_id"] = sessionID
+	}
+
+	if encoded, err := json.Marshal(payload); err == nil {
+		target.Set("X-Codex-Turn-Metadata", string(encoded))
+	}
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
