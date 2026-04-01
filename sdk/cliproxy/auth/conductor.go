@@ -584,6 +584,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq.Model = execModel
 		audit.SetAttempt(ctx, provider, execModel, auth.ID, auth.Label, auth.FileName, auditAuthPath(auth))
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		m.syncExecutionAuth(ctx, auth)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -663,6 +664,34 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
 	}
 	return nil, lastErr
+}
+
+func (m *Manager) syncExecutionAuth(ctx context.Context, auth *Auth) {
+	if m == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	nextCLIUA := ""
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["cli_ua"].(string); ok {
+			nextCLIUA = strings.TrimSpace(raw)
+		}
+	}
+
+	m.mu.RLock()
+	current := m.auths[auth.ID]
+	currentCLIUA := ""
+	if current != nil && current.Metadata != nil {
+		if raw, ok := current.Metadata["cli_ua"].(string); ok {
+			currentCLIUA = strings.TrimSpace(raw)
+		}
+	}
+	m.mu.RUnlock()
+
+	if nextCLIUA == "" || nextCLIUA == currentCLIUA {
+		return
+	}
+	auth.UpdatedAt = time.Now()
+	_, _ = m.Update(ctx, auth)
 }
 
 func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
@@ -1075,6 +1104,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq.Model = upstreamModel
 			audit.SetAttempt(execCtx, provider, upstreamModel, auth.ID, auth.Label, auth.FileName, auditAuthPath(auth))
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			m.syncExecutionAuth(execCtx, auth)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 			attachRequestSimHashResult(&result, opts.Metadata)
 			if errExec != nil {
@@ -1153,6 +1183,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq.Model = upstreamModel
 			audit.SetAttempt(execCtx, provider, upstreamModel, auth.ID, auth.Label, auth.FileName, auditAuthPath(auth))
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			m.syncExecutionAuth(execCtx, auth)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 			attachRequestSimHashResult(&result, opts.Metadata)
 			if errExec != nil {
